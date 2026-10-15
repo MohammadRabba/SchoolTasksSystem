@@ -1,0 +1,427 @@
+// Prisma schema for مدرسة ذكور المستقبل الصالح الأساسية العليا
+// School Administration & Teacher Work Tracking System
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url  	    = env("DATABASE_URL")
+  // uncomment next line if you use Prisma <5.10
+  // directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ============================================================
+// 1. ADMIN USER — single authorized administrator only
+// ============================================================
+model Admin {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  name           String
+  passwordHash   String
+  role           String   @default("ADMIN")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  auditLogs      AuditLog[]
+  reviews        Review[]
+  approvals      WorkRecord[] @relation("ApprovedBy")
+  uploads        Attachment[]
+}
+
+// ============================================================
+// 1B. LOGIN ATTEMPTS — for brute-force protection
+// ============================================================
+// Tracks all failed login attempts in the last 15 minutes per email.
+// After 5 failed attempts within 15 minutes, login is blocked for that email.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  success   Boolean
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([email, success, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 1C. CLASS SECTIONS — global registry of classes/sections in the school
+// ============================================================
+// Teachers are linked to multiple class sections via TeacherClassSection.
+// Class sections can be filtered in substitutions + departures + reports.
+model ClassSection {
+  id          String   @id @default(cuid())
+  className    String   // e.g., "السادس", "السابع", "الثامن"
+  sectionName  String   // e.g., "أ", "ب", "ج"
+  notes       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  teachers   TeacherClassSection[]
+
+  @@unique([className, sectionName])
+  @@index([isActive])
+}
+
+// ============================================================
+// 2. SETTINGS — single configurable row
+// ============================================================
+model Setting {
+  id                        String   @id @default(cuid())
+  schoolNameAr              String   @default("مدرسة ذكور المستقبل الصالح الأساسية العليا")
+  schoolNameEn              String   @default("Al-Mustaqbal Al-Saleh Upper Basic Boys School")
+  logoUrl                   String?
+  timezone                  String   @default("Asia/Gaza")
+  workingDays               String   @default("SUN,MON,TUE,WED,THU")
+  defaultDeadlineDays       Int      @default(7)
+  notificationThresholdDays Int      @default(3)
+  maxSubstitutionPeriods    Int      @default(10)
+  reportWeekStart           String   @default("SUNDAY")
+  academicYearName          String   @default("2025/2026")
+  pdfFontName               String   @default("Cairo")
+  updatedAt                 DateTime @updatedAt
+}
+
+// ============================================================
+// 3. SCHOOL YEAR & PERIODS
+// ============================================================
+model SchoolYear {
+  id          String   @id @default(cuid())
+  name        String
+  startDate   DateTime
+  endDate     DateTime
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  terms       SchoolPeriod[]
+  assignments Assignment[]
+  recurringAssignments RecurringAssignment[]
+}
+
+model SchoolPeriod {
+  id          String   @id @default(cuid())
+  schoolYearId String
+  name        String
+  startDate   DateTime
+  endDate     DateTime
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  schoolYear  SchoolYear @relation(fields: [schoolYearId], references: [id], onDelete: Cascade)
+  assignments Assignment[]
+  recurringAssignments RecurringAssignment[]
+
+  @@unique([schoolYearId, name])
+}
+
+// ============================================================
+// 4. TEACHERS
+// ============================================================
+model Teacher {
+  id                  String   @id @default(cuid())
+  employeeNumber      String?  @unique
+  fullName            String
+  specialization      String?
+  subjects            String?  // comma-separated for SQLite
+  weeklyPeriodCount   Int      @default(0)
+  employmentStartDate DateTime?
+  employmentStatus    String   @default("ACTIVE") // ACTIVE, ON_LEAVE, INACTIVE
+  administrativeNotes String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  archivedAt          DateTime?
+
+  classesAndSections  TeacherClassSection[]
+  workRecords        WorkRecord[]
+  substitutionsAsOriginal  Substitution[] @relation("OriginalTeacher")
+  substitutionsAsSubstitute Substitution[] @relation("SubstituteTeacher")
+  departures         Departure[]
+  recurringAssignmentTeachers RecurringAssignmentTeacher[]
+
+  @@index([employmentStatus])
+  @@index([fullName])
+}
+
+// Normalized teacher-class-section relation
+model TeacherClassSection {
+  id              String   @id @default(cuid())
+  teacherId       String
+  className       String
+  sectionName     String?
+  classSectionId  String?  // optional link to the global ClassSection registry
+  teacher         Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  classSection    ClassSection? @relation(fields: [classSectionId], references: [id], onDelete: SetNull)
+
+  @@unique([teacherId, className, sectionName])
+  @@index([teacherId])
+  @@index([classSectionId])
+}
+
+// ============================================================
+// 5. WORK TYPES
+// ============================================================
+model WorkType {
+  id                    String   @id @default(cuid())
+  name                  String
+  description           String?
+  defaultFrequency      String   @default("WEEKLY") // DAILY, WEEKLY, MONTHLY, TERM_BASED, ANNUAL, ONE_TIME
+  defaultCompletionDays Int?
+  requiresApproval      Boolean  @default(true)
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  assignments           Assignment[]
+  recurringAssignments  RecurringAssignment[]
+
+  @@index([isActive])
+}
+
+// ============================================================
+// 6. ASSIGNMENTS
+// ============================================================
+model Assignment {
+  id                  String   @id @default(cuid())
+  title               String
+  description         String?
+  workTypeId          String
+  assignedDate        DateTime
+  dueDate             DateTime
+  schoolYearId        String
+  schoolPeriodId      String?
+  coveredPeriodStart  DateTime?
+  coveredPeriodEnd    DateTime?
+  priority            String   @default("NORMAL") // LOW, NORMAL, HIGH, URGENT
+  assignmentStatus    String   @default("ACTIVE") // ACTIVE, COMPLETED, CANCELLED
+  adminInstructions   String?
+  recurringAssignmentId String?  // null for one-off assignments, set when auto-generated
+  archivedAt          DateTime?  // soft-archive — excludes from main lists but preserves history
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  workType            WorkType   @relation(fields: [workTypeId], references: [id])
+  schoolYear          SchoolYear @relation(fields: [schoolYearId], references: [id])
+  schoolPeriod        SchoolPeriod? @relation(fields: [schoolPeriodId], references: [id])
+  workRecords         WorkRecord[]
+  recurringAssignment RecurringAssignment? @relation(fields: [recurringAssignmentId], references: [id])
+
+  @@index([dueDate])
+  @@index([assignmentStatus])
+  @@index([workTypeId])
+  @@index([schoolYearId])
+  @@index([recurringAssignmentId])
+}
+
+// ============================================================
+// 6B. RECURRING ASSIGNMENTS — auto-generation schedule
+// ============================================================
+// Defines a recurring schedule (e.g., "Daily attendance for teachers X, Y, Z")
+// The system auto-creates individual Assignment records for each scheduled day.
+model RecurringAssignment {
+  id                  String   @id @default(cuid())
+  title               String
+  description         String?
+  workTypeId          String
+  // Frequency: DAILY = every selected weekday; WEEKLY = once per week on the selected day
+  frequency           String   @default("DAILY")  // DAILY, WEEKLY, MONTHLY
+  // Comma-separated list of weekday names the assignment should run on
+  // For DAILY: SUN,MON,TUE,WED,THU (school week — Fri/Sat typically off in Palestine)
+  // For WEEKLY: one of SUN/MON/TUE/WED/THU
+  // For MONTHLY: day-of-month number (1..31) — comma-separated for multiple
+  daysOfWeek          String   @default("SUN,MON,TUE,WED,THU")
+  // Period during which the recurring assignment is active (auto-generation window)
+  startDate           DateTime
+  endDate             DateTime
+  // Days from the assigned date until the due date (0 = same day, 1 = next day, etc.)
+  dueOffsetDays       Int      @default(0)
+  priority            String   @default("NORMAL")  // LOW, NORMAL, HIGH, URGENT
+  schoolYearId        String
+  schoolPeriodId      String?
+  adminInstructions   String?
+  isActive            Boolean  @default(true)
+  // Track last generation date to avoid duplicate creation
+  lastGeneratedAt     DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  workType            WorkType   @relation(fields: [workTypeId], references: [id])
+  schoolYear          SchoolYear @relation(fields: [schoolYearId], references: [id])
+  schoolPeriod        SchoolPeriod? @relation(fields: [schoolPeriodId], references: [id])
+  // Teacher IDs are stored in a separate join table for many-to-many
+  teachers            RecurringAssignmentTeacher[]
+  assignments         Assignment[]
+
+  @@index([isActive])
+  @@index([schoolYearId])
+  @@index([startDate, endDate])
+}
+
+model RecurringAssignmentTeacher {
+  id                    String @id @default(cuid())
+  recurringAssignmentId String
+  teacherId             String
+  recurringAssignment   RecurringAssignment @relation(fields: [recurringAssignmentId], references: [id], onDelete: Cascade)
+  teacher               Teacher             @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@unique([recurringAssignmentId, teacherId])
+  @@index([recurringAssignmentId])
+}
+
+// ============================================================
+// 7. WORK RECORDS (per-teacher progress for an assignment)
+// ============================================================
+model WorkRecord {
+  id                String    @id @default(cuid())
+  assignmentId      String
+  teacherId         String
+  status            String    @default("NOT_STARTED")
+  // NOT_STARTED, IN_PROGRESS, SUBMITTED, NEEDS_REVISION, COMPLETED, APPROVED, REJECTED, CANCELLED
+  completionDate    DateTime?
+  submittedAt       DateTime?
+  approvedAt        DateTime?
+  approvedById      String?
+  administrativeNotes String?
+  revisionNotes     String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  assignment        Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  teacher           Teacher   @relation(fields: [teacherId], references: [id])
+  approvedBy        Admin?    @relation("ApprovedBy", fields: [approvedById], references: [id])
+  reviews           Review[]
+
+  @@unique([assignmentId, teacherId])
+  @@index([teacherId, status])
+  @@index([assignmentId, status])
+}
+
+// ============================================================
+// 8. REVIEWS (history of approval/revision actions)
+// ============================================================
+model Review {
+  id                  String   @id @default(cuid())
+  workRecordId        String
+  reviewResult        String   // APPROVED, NEEDS_REVISION, REJECTED
+  reviewNotes         String?
+  reviewedAt          DateTime @default(now())
+  administratorId      String
+  previousStatus      String
+  newStatus           String
+
+  workRecord          WorkRecord @relation(fields: [workRecordId], references: [id], onDelete: Cascade)
+  administrator       Admin     @relation(fields: [administratorId], references: [id])
+
+  @@index([workRecordId])
+}
+
+// ============================================================
+// 9. SUBSTITUTIONS (حصص الإشغالات)
+// ============================================================
+model Substitution {
+  id                 String   @id @default(cuid())
+  substitutionDate   DateTime
+  periodNumber       Int
+  periodStartTime    String?
+  periodEndTime      String?
+  originalTeacherId  String?
+  substituteTeacherId String?
+  className          String
+  sectionName        String?
+  reasonType         String   // ABSENCE, DEPARTURE_LEAVE, ADMIN_ASSIGNMENT, EMERGENCY, OTHER
+  customReason       String?
+  numberOfPeriods    Int      @default(1)
+  administrativeNotes String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  originalTeacher    Teacher? @relation("OriginalTeacher", fields: [originalTeacherId], references: [id])
+  substituteTeacher  Teacher? @relation("SubstituteTeacher", fields: [substituteTeacherId], references: [id])
+
+  @@index([substitutionDate])
+  @@index([originalTeacherId])
+  @@index([substituteTeacherId])
+}
+
+// ============================================================
+// 10. DEPARTURES (تقارير المغادرة)
+// ============================================================
+model Departure {
+  id                  String   @id @default(cuid())
+  teacherId           String
+  departureDate       DateTime
+  departureTime       String
+  returnTime          String?
+  departureType       String   // PERSONAL, MEDICAL, OFFICIAL, EMERGENCY, OTHER
+  reason              String?
+  permissionType      String   @default("PRE_APPROVED") // PRE_APPROVED, EMERGENCY
+  approvalStatus     String   @default("PENDING") // PENDING, APPROVED, REJECTED, COMPLETED
+  authorizedBy        String?
+  affectedPeriodCount Int      @default(0)
+  coverageArrangements String?
+  administrativeNotes String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  teacher            Teacher  @relation(fields: [teacherId], references: [id])
+
+  @@index([teacherId, departureDate])
+  @@index([approvalStatus])
+}
+
+// ============================================================
+// 11. ATTACHMENTS (optional file storage metadata)
+// ============================================================
+model Attachment {
+  id              String   @id @default(cuid())
+  entityType      String   // DEPARTURE, WORK_RECORD, ASSIGNMENT, etc.
+  entityId        String
+  originalFilename String
+  storageKey      String
+  contentType     String?
+  fileSize        Int?
+  uploadedAt      DateTime @default(now())
+  uploadedById    String
+
+  uploadedBy      Admin    @relation(fields: [uploadedById], references: [id])
+
+  @@index([entityType, entityId])
+}
+
+// ============================================================
+// 12. AUDIT LOGS
+// ============================================================
+model AuditLog {
+  id                  String   @id @default(cuid())
+  administratorId      String
+  actionType          String   // CREATE, UPDATE, DELETE, ARCHIVE, APPROVE, REJECT, IMPORT, LOGIN, LOGOUT
+  entityType          String
+  entityId            String?
+  previousValues      String?  // JSON
+  newValues           String?  // JSON
+  createdAt           DateTime @default(now())
+
+  administrator       Admin    @relation(fields: [administratorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 13. NOTIFICATIONS (in-app, database-driven)
+// ============================================================
+model Notification {
+  id          String   @id @default(cuid())
+  type        String   // OVERDUE, UPCOMING_DEADLINE, REVISION_REQUESTED, DEPARTURE_PENDING, UNASSIGNED_SUBSTITUTION
+  title       String
+  message     String
+  entityType  String?
+  entityId    String?
+  isRead      Boolean  @default(false)
+  isResolved  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  resolvedAt  DateTime?
+
+  @@index([isRead, isResolved])
+  @@index([createdAt])
+}
